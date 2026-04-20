@@ -84,3 +84,8 @@ effect:
 sudo systemctl restart containerd
 # log out and back in (or `newgrp containerd` in the current shell)
 ```
+
+## Related projects
+
+- [psviderski/unregistry](https://github.com/psviderski/unregistry): Same
+  goal, but requires temporarily running a registry on the remote.

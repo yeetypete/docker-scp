@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"io"
 	"sync"
 	"sync/atomic"
@@ -16,7 +15,7 @@ import (
 
 // layerBar renders one row per layer: Pushing → Pushed → Extracting → Push
 // complete. The bar is built with total=0 so mpb's triggerComplete stays off,
-// letting current reach size without auto-completing; we complete explicitly
+// letting current reach size without auto-completing. We complete explicitly
 // via SetTotal(size, true) once extract finishes.
 type layerBar struct {
 	bar  *mpb.Bar
@@ -30,18 +29,13 @@ type layerBar struct {
 // Methods on *layerBar are safe to call on a nil receiver so callers holding a
 // bar handle don't need to null-check (non-layer descriptors have no bar).
 
-func (lb *layerBar) setTransferred() {
-	if lb == nil {
-		return
-	}
-	lb.bar.SetCurrent(lb.size)
-	lb.transferDone.Store(true)
-}
-
+// transferFinish advances the bar to full and flips to the Pushed label.
+// SetCurrent is idempotent when the streamed proxyReader already reached size.
 func (lb *layerBar) transferFinish() {
 	if lb == nil {
 		return
 	}
+	lb.bar.SetCurrent(lb.size)
 	lb.transferDone.Store(true)
 }
 
@@ -84,7 +78,7 @@ func newProgressState(p *mpb.Progress) *progressState {
 	return &progressState{p: p, bars: make(map[digest.Digest]*layerBar)}
 }
 
-// layerFor returns a bar for desc if it is a layer; nil otherwise. Non-layer
+// layerFor returns a bar for desc if it is a layer, nil otherwise. Non-layer
 // blobs (manifests, config, index) transfer silently.
 func (s *progressState) layerFor(desc ocispec.Descriptor) *layerBar {
 	if !images.IsLayerType(desc.MediaType) {
@@ -122,18 +116,18 @@ func (s *progressState) finalize() {
 
 func (s *progressState) newBar(desc ocispec.Descriptor) *layerBar {
 	lb := &layerBar{size: desc.Size}
-	d := desc.Digest
+	id := short(desc.Digest)
 
 	label := decor.Any(func(_ decor.Statistics) string {
 		switch {
 		case lb.extractEnd.Load():
-			return fmt.Sprintf("%s: Push complete", short(d))
+			return id + ": Push complete"
 		case lb.extractStart.Load() != 0:
-			return fmt.Sprintf("%s: Extracting", short(d))
+			return id + ": Extracting"
 		case lb.transferDone.Load():
-			return fmt.Sprintf("%s: Pushed", short(d))
+			return id + ": Pushed"
 		default:
-			return fmt.Sprintf("%s: Pushing", short(d))
+			return id + ": Pushing"
 		}
 	})
 

@@ -18,14 +18,13 @@ type localSource struct {
 	client *client.Client
 }
 
-func openLocal(_ context.Context) (*localSource, error) {
-	sock := remoteSocketPath
-	if _, err := os.Stat(sock); err != nil {
-		return nil, fmt.Errorf("local containerd socket %s: %w", sock, err)
+func openLocal() (*localSource, error) {
+	if _, err := os.Stat(containerdSocketPath); err != nil {
+		return nil, fmt.Errorf("local containerd socket %s: %w", containerdSocketPath, err)
 	}
-	c, err := client.New(sock, client.WithDefaultNamespace(localNamespace))
+	c, err := client.New(containerdSocketPath, client.WithDefaultNamespace(localNamespace))
 	if err != nil {
-		return nil, fmt.Errorf("connect %s: %w", sock, err)
+		return nil, fmt.Errorf("connect %s: %w", containerdSocketPath, err)
 	}
 	return &localSource{client: c}, nil
 }
@@ -64,7 +63,7 @@ func (l *localSource) resolveAndEnumerate(ctx context.Context, ref string, plat 
 		// Only follow children whose content is locally present. This naturally
 		// scopes the transfer to whatever platform(s) the user pulled locally.
 		// When --platform is set, further restrict to descriptors matching it
-		// (index entries carry a Platform; config/layer children don't).
+		// (index entries carry a Platform, config/layer children don't).
 		kept := children[:0]
 		for _, c := range children {
 			if matcher != nil && c.Platform != nil && !matcher.Match(*c.Platform) {

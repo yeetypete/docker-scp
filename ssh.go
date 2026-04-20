@@ -86,7 +86,7 @@ func (t *sshTunnel) queryRemoteCPUs() (int, error) {
 
 func (t *sshTunnel) dialer() func(ctx context.Context, _ string) (net.Conn, error) {
 	return func(ctx context.Context, _ string) (net.Conn, error) {
-		return dialViaBridge(ctx, t.client, remoteSocketPath)
+		return dialViaBridge(ctx, t.client, containerdSocketPath)
 	}
 }
 

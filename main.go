@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -33,12 +32,12 @@ Options:
       --platform string   Push a specific platform of a multi-platform image (e.g. linux/arm64)`
 
 const (
-	version           = "0.0.1"
-	remoteSocketPath  = "/run/containerd/containerd.sock"
-	remoteNamespace   = "moby"
-	remoteSnapshotter = "overlayfs"
-	localNamespace    = "moby"
-	uploadConcurrency = 6
+	version              = "0.0.1"
+	containerdSocketPath = "/run/containerd/containerd.sock"
+	remoteNamespace      = "moby"
+	remoteSnapshotter    = "overlayfs"
+	localNamespace       = "moby"
+	uploadConcurrency    = 6
 )
 
 type pluginMetadata struct {
@@ -58,7 +57,7 @@ func main() {
 func run() int {
 	args := os.Args[1:]
 
-	// Docker CLI plugins get their subcommand name as the first arg; strip
+	// Docker CLI plugins get their subcommand name as the first arg. Strip
 	// it so the rest of argv matches what the user typed.
 	bin := filepath.Base(os.Args[0])
 	if strings.HasPrefix(bin, "docker-") && len(args) > 0 {
@@ -109,9 +108,8 @@ func run() int {
 		platform = &p
 	}
 
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})))
 	// Suppress containerd's internal log lines (snapshot cleanup noise on
-	// cancel, etc.); our own slog surfaces anything push-level.
+	// cancel, etc.). Push-level errors surface via stderr from push().
 	_ = ctrdlog.SetLevel("fatal")
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -126,7 +124,7 @@ func run() int {
 		fmt.Fprintln(os.Stderr, "cancelled")
 		return 130
 	}
-	slog.Error("push failed", "error", err)
+	fmt.Fprintf(os.Stderr, "push failed: %v\n", err)
 	return 1
 }
 
@@ -140,7 +138,7 @@ type pushConfig struct {
 }
 
 func push(ctx context.Context, cfg pushConfig) error {
-	local, err := openLocal(ctx)
+	local, err := openLocal()
 	if err != nil {
 		return fmt.Errorf("open local containerd: %w", err)
 	}

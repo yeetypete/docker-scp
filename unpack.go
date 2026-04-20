@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 
+	introspectionapi "github.com/containerd/containerd/api/services/introspection/v1"
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/diff"
 	"github.com/containerd/containerd/v2/core/images"
@@ -31,36 +32,43 @@ func unpackRemote(ctx context.Context, dst *remoteSink, store content.Store, img
 		ready: tracker,
 	}
 
-	caps, err := snapshotterCapabilities(ctx, dst, remoteSnapshotter)
+	plugin, err := findSnapshotter(ctx, dst, remoteSnapshotter)
 	if err != nil {
-		return fmt.Errorf("query snapshotter caps: %w", err)
+		return fmt.Errorf("query snapshotter: %w", err)
 	}
-	if slices.Contains(caps, "rebase") {
+	if slices.Contains(plugin.GetCapabilities(), "rebase") {
 		return unpackParallel(ctx, dst, store, img, matcher, applier, descs)
 	}
 	return unpackSerial(ctx, dst, store, img, matcher, applier)
 }
 
 func remoteHostPlatform(ctx context.Context, dst *remoteSink) (ocispec.Platform, error) {
-	resp, err := dst.client.IntrospectionService().Plugins(ctx, "type==io.containerd.snapshotter.v1")
+	plugin, err := findSnapshotter(ctx, dst, remoteSnapshotter)
 	if err != nil {
 		return ocispec.Platform{}, err
 	}
-	for _, p := range resp.GetPlugins() {
-		if p.GetID() != remoteSnapshotter {
-			continue
-		}
-		plats := p.GetPlatforms()
-		if len(plats) == 0 {
-			return ocispec.Platform{}, fmt.Errorf("snapshotter %q reports no platforms", remoteSnapshotter)
-		}
-		return ocispec.Platform{
-			OS:           plats[0].GetOS(),
-			Architecture: plats[0].GetArchitecture(),
-			Variant:      plats[0].GetVariant(),
-		}, nil
+	plats := plugin.GetPlatforms()
+	if len(plats) == 0 {
+		return ocispec.Platform{}, fmt.Errorf("snapshotter %q reports no platforms", remoteSnapshotter)
 	}
-	return ocispec.Platform{}, fmt.Errorf("snapshotter %q not found on remote", remoteSnapshotter)
+	return ocispec.Platform{
+		OS:           plats[0].GetOS(),
+		Architecture: plats[0].GetArchitecture(),
+		Variant:      plats[0].GetVariant(),
+	}, nil
+}
+
+func findSnapshotter(ctx context.Context, dst *remoteSink, name string) (*introspectionapi.Plugin, error) {
+	resp, err := dst.client.IntrospectionService().Plugins(ctx, "type==io.containerd.snapshotter.v1")
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range resp.GetPlugins() {
+		if p.GetID() == name {
+			return p, nil
+		}
+	}
+	return nil, fmt.Errorf("snapshotter %q not found on remote", name)
 }
 
 func unpackSerial(ctx context.Context, dst *remoteSink, cs content.Store, img images.Image, matcher platforms.MatchComparer, applier diff.Applier) error {
@@ -143,19 +151,6 @@ func unpackParallel(ctx context.Context, dst *remoteSink, store content.Store, i
 		return fmt.Errorf("unpacker.Wait: %w", err)
 	}
 	return nil
-}
-
-func snapshotterCapabilities(ctx context.Context, dst *remoteSink, name string) ([]string, error) {
-	resp, err := dst.client.IntrospectionService().Plugins(ctx, "type==io.containerd.snapshotter.v1")
-	if err != nil {
-		return nil, err
-	}
-	for _, p := range resp.GetPlugins() {
-		if p.GetID() == name {
-			return p.GetCapabilities(), nil
-		}
-	}
-	return nil, fmt.Errorf("snapshotter %q not found on remote", name)
 }
 
 func short(d digest.Digest) string {

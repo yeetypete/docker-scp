@@ -32,10 +32,12 @@ func transferBlobs(ctx context.Context, src *localSource, dst *remoteSink, descs
 }
 
 func transferOne(ctx context.Context, src *localSource, dst content.Store, d ocispec.Descriptor, lb *layerBar) error {
-	if _, err := dst.Info(ctx, d.Digest); err == nil {
-		lb.setTransferred()
+	_, err := dst.Info(ctx, d.Digest)
+	if err == nil {
+		lb.transferFinish()
 		return nil
-	} else if !errdefs.IsNotFound(err) {
+	}
+	if !errdefs.IsNotFound(err) {
 		lb.abort()
 		return fmt.Errorf("stat remote %s: %w", d.Digest, err)
 	}
@@ -53,7 +55,7 @@ func transferOne(ctx context.Context, src *localSource, dst content.Store, d oci
 	)
 	if err != nil {
 		if errdefs.IsAlreadyExists(err) {
-			lb.setTransferred()
+			lb.transferFinish()
 			return nil
 		}
 		lb.abort()

@@ -19,11 +19,16 @@ type remoteSink struct {
 	cpus   int
 }
 
-func openRemote(ctx context.Context, cfg pushConfig) (*remoteSink, error) {
+func openRemote(ctx context.Context, cfg pushConfig) (_ *remoteSink, retErr error) {
 	tunnel, err := openSSHTunnel(ctx, cfg.SSHTarget)
 	if err != nil {
 		return nil, fmt.Errorf("open ssh tunnel: %w", err)
 	}
+	defer func() {
+		if retErr != nil {
+			_ = tunnel.Close()
+		}
+	}()
 
 	// Default HTTP/2 windows (64 KiB) cap per-stream throughput at window/RTT.
 	// Bumping both windows lets concurrent blob uploads saturate the link.
@@ -31,10 +36,10 @@ func openRemote(ctx context.Context, cfg pushConfig) (*remoteSink, error) {
 		grpcStreamWindow = 16 * 1024 * 1024
 		grpcConnWindow   = 64 * 1024 * 1024
 	)
-	// Address is a placeholder; our context dialer ignores it and routes all
+	// Address is a placeholder. Our context dialer ignores it and routes all
 	// connections through the SSH tunnel. Needs a leading slash so containerd's
 	// `unix://` prefix produces a valid URL (path, not authority).
-	c, err := client.New(remoteSocketPath,
+	c, err := client.New(containerdSocketPath,
 		client.WithDefaultNamespace(remoteNamespace),
 		client.WithExtraDialOpts([]grpc.DialOption{
 			grpc.WithContextDialer(tunnel.dialer()),
@@ -43,15 +48,17 @@ func openRemote(ctx context.Context, cfg pushConfig) (*remoteSink, error) {
 		}),
 	)
 	if err != nil {
-		_ = tunnel.Close()
 		return nil, fmt.Errorf("containerd client: %w", err)
 	}
+	defer func() {
+		if retErr != nil {
+			_ = c.Close()
+		}
+	}()
 
 	// containerd doesn't auto-create namespaces and most RPCs fail against a
 	// missing one.
 	if err := c.NamespaceService().Create(ctx, remoteNamespace, nil); err != nil && !errdefs.IsAlreadyExists(err) {
-		_ = c.Close()
-		_ = tunnel.Close()
 		return nil, fmt.Errorf("ensure namespace %q: %w", remoteNamespace, err)
 	}
 
@@ -63,8 +70,6 @@ func openRemote(ctx context.Context, cfg pushConfig) (*remoteSink, error) {
 		}),
 	)
 	if err != nil {
-		_ = c.Close()
-		_ = tunnel.Close()
 		return nil, fmt.Errorf("create lease: %w", err)
 	}
 

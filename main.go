@@ -25,7 +25,12 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-const usage = "Usage: docker scp [--platform os/arch[/variant]] IMAGE [user@]host[:port]"
+const usage = `Usage:  docker scp [OPTIONS] IMAGE [USER@]HOST[:PORT]
+
+Push an image directly to a remote containerd over SSH
+
+Options:
+      --platform string   Push a specific platform of a multi-platform image (e.g. linux/arm64)`
 
 const (
 	version           = "0.0.1"
@@ -80,6 +85,10 @@ func run() int {
 	fs.SetOutput(io.Discard)
 	platformStr := fs.String("platform", "", "")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			fmt.Fprintln(os.Stdout, usage)
+			return 0
+		}
 		fmt.Fprintln(os.Stderr, err)
 		fmt.Fprintln(os.Stderr, usage)
 		return 2

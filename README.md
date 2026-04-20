@@ -31,8 +31,11 @@ make uninstall-docker-plugin
 
 ## Usage
 
-```bash
-docker scp [--platform os/arch[/variant]] IMAGE [user@]host[:port]
+```
+docker scp [OPTIONS] IMAGE [USER@]HOST[:PORT]
+
+Options:
+      --platform string   Push a specific platform of a multi-platform image (e.g. linux/arm64)
 ```
 
 ### Examples

@@ -1,7 +1,7 @@
 # `docker-scp`
 
 A `docker` CLI plugin which pushes Docker / OCI images directly from a local
-containerd content store to a remote containerd runtime over SSH. No intermediate
+containerd image store to a remote containerd runtime over SSH. No intermediate
 registry, and no remote daemon required.
 
 Layers transfer over a gRPC connection tunneled through the SSH session and unpack
@@ -54,7 +54,7 @@ docker scp --platform linux/arm64 ubuntu:24.04 user@remote
 
 ## Prerequisites
 
-The plugin reads from the local containerd content store and writes to the
+The plugin reads from the local containerd image store and writes to the
 remote one over SSH, so **both the local and remote machines** need:
 
 1. Docker's [containerd image store](https://docs.docker.com/engine/storage/containerd/) enabled.

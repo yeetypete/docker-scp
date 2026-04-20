@@ -10,6 +10,7 @@ import (
 	"github.com/containerd/containerd/v2/core/diff"
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/mount"
+	"github.com/containerd/containerd/v2/core/snapshots"
 	"github.com/containerd/containerd/v2/core/unpack"
 	"github.com/containerd/containerd/v2/pkg/labels"
 	"github.com/containerd/containerd/v2/pkg/rootfs"
@@ -35,6 +36,18 @@ func unpackRemote(ctx context.Context, dst *remoteSink, store content.Store, img
 	if err != nil {
 		return fmt.Errorf("query snapshotter: %w", err)
 	}
+
+	// Flip bars for layers whose chain is already unpacked, independently of
+	// the unpacker's serialized topHalf loop.
+	sn := dst.client.SnapshotService(remoteSnapshotter)
+	if len(plats) == 0 {
+		scanExistingChains(ctx, store, sn, img, platforms.All, ps)
+	} else {
+		for _, p := range plats {
+			scanExistingChains(ctx, store, sn, img, platforms.Only(p), ps)
+		}
+	}
+
 	if slices.Contains(plugin.GetCapabilities(), "rebase") {
 		return unpackParallel(ctx, dst, store, img, unpackMatcher(plats), applier, descs)
 	}
@@ -47,6 +60,36 @@ func unpackRemote(ctx context.Context, dst *remoteSink, store content.Store, img
 		}
 	}
 	return nil
+}
+
+// scanExistingChains walks the image's layer chain for the matched platform
+// and flips bars whose snapshot is already on the remote. Best-effort: errors
+// are swallowed (the real unpack step is authoritative).
+func scanExistingChains(ctx context.Context, store content.Store, sn snapshots.Snapshotter, img images.Image, matcher platforms.MatchComparer, ps *progressState) {
+	manifest, err := images.Manifest(ctx, store, img.Target, matcher)
+	if err != nil {
+		return
+	}
+	configDesc, err := images.Config(ctx, store, img.Target, matcher)
+	if err != nil {
+		return
+	}
+	diffIDs, err := images.RootFS(ctx, store, configDesc)
+	if err != nil {
+		return
+	}
+	if len(manifest.Layers) != len(diffIDs) {
+		return
+	}
+	chain := make([]digest.Digest, 0, len(diffIDs))
+	for i, diffID := range diffIDs {
+		chain = append(chain, diffID)
+		chainID := identity.ChainID(chain).String()
+		if _, err := sn.Stat(ctx, chainID); err != nil {
+			return
+		}
+		ps.lookup(manifest.Layers[i].Digest).extractFinish()
+	}
 }
 
 // unpackMatcher falls back to platforms.All when the caller has no filter;

@@ -102,7 +102,8 @@ func (s *progressState) lookup(d digest.Digest) *layerBar {
 
 // finalize closes out any bars whose extract phase never ran (layer was
 // already unpacked on the remote). Without this, prog.Wait blocks forever on
-// bars with triggerComplete still unset.
+// bars with triggerComplete still unset. Called after both transfer and
+// unpack goroutines finish, so flipping any non-complete bar is safe.
 func (s *progressState) finalize() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -133,7 +134,7 @@ func (s *progressState) newBar(desc ocispec.Descriptor) *layerBar {
 
 	counters := decor.CountersKiloByte(" %.2f/%.2f")
 	conditionalCounters := decor.Any(func(st decor.Statistics) string {
-		if lb.extractStart.Load() != 0 || lb.extractEnd.Load() {
+		if lb.transferDone.Load() {
 			return ""
 		}
 		s, _ := counters.Decor(st)
@@ -179,6 +180,8 @@ func (d *dynamicFiller) Fill(w io.Writer, st decor.Statistics) error {
 		dur := time.Since(time.Unix(0, d.lb.extractStart.Load()))
 		_, err := io.WriteString(w, frame+" "+dur.Round(time.Second).String())
 		return err
+	case d.lb.transferDone.Load():
+		return nil
 	default:
 		return d.bar.Fill(w, st)
 	}

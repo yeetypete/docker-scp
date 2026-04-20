@@ -59,7 +59,7 @@ remote one over SSH, so **both the local and remote machines** need:
 1. Group access to `/run/containerd/containerd.sock`. The user running `docker scp`
    locally and the SSH user on the remote both need to be in the socket's group.
 
-### Adding a containerd group
+### Adding a containerd Group
 
 Run these steps on **both machines**. Create a `containerd` group and add
 your user to it:
@@ -85,7 +85,10 @@ sudo systemctl restart containerd
 # log out and back in (or `newgrp containerd` in the current shell)
 ```
 
-## Related projects
+## Related
 
 - [psviderski/unregistry](https://github.com/psviderski/unregistry): Same
   goal, but requires temporarily running a registry on the remote.
+- [`podman image scp`](https://docs.podman.io/en/stable/markdown/podman-image-scp.1.html):
+  Built into Podman. Transfers the full image via save/load over SSH (no
+  layer dedup).

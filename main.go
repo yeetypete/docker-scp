@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"log/slog"
@@ -21,6 +20,7 @@ import (
 	ctrdlog "github.com/containerd/log"
 	"github.com/containerd/platforms"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/spf13/pflag"
 	"github.com/vbauerster/mpb/v8"
 	"golang.org/x/sync/errgroup"
 )
@@ -81,12 +81,12 @@ func run() int {
 		return 0
 	}
 
-	fs := flag.NewFlagSet("docker scp", flag.ContinueOnError)
+	fs := pflag.NewFlagSet("docker scp", pflag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	platformStr := fs.String("platform", "", "")
 	if err := fs.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			fmt.Fprintln(os.Stdout, usage)
+		if errors.Is(err, pflag.ErrHelp) {
+			_, _ = fmt.Fprintln(os.Stdout, usage)
 			return 0
 		}
 		fmt.Fprintln(os.Stderr, err)

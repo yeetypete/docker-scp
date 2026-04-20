@@ -29,7 +29,8 @@ const usage = `Usage:  docker scp [OPTIONS] IMAGE [USER@]HOST[:PORT]
 Push an image directly to a remote containerd over SSH
 
 Options:
-      --platform string   Push a specific platform of a multi-platform image (e.g. linux/arm64)`
+      --platform strings   Push specific platforms of a multi-platform image
+                           (comma-separated, e.g. linux/amd64,linux/arm64)`
 
 const (
 	version              = "0.0.1"
@@ -82,7 +83,7 @@ func run() int {
 
 	fs := pflag.NewFlagSet("docker scp", pflag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	platformStr := fs.String("platform", "", "")
+	platformStrs := fs.StringSlice("platform", nil, "")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, pflag.ErrHelp) {
 			_, _ = fmt.Fprintln(os.Stdout, usage)
@@ -98,14 +99,14 @@ func run() int {
 		return 2
 	}
 
-	var platform *ocispec.Platform
-	if *platformStr != "" {
-		p, err := platforms.Parse(*platformStr)
+	var reqPlatforms []ocispec.Platform
+	for _, s := range *platformStrs {
+		p, err := platforms.Parse(s)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "invalid --platform %q: %v\n", *platformStr, err)
+			fmt.Fprintf(os.Stderr, "invalid --platform %q: %v\n", s, err)
 			return 2
 		}
-		platform = &p
+		reqPlatforms = append(reqPlatforms, p)
 	}
 
 	// Suppress containerd's internal log lines (snapshot cleanup noise on
@@ -115,7 +116,7 @@ func run() int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	cfg := pushConfig{ImageRef: positional[0], SSHTarget: positional[1], Platform: platform}
+	cfg := pushConfig{ImageRef: positional[0], SSHTarget: positional[1], Platforms: reqPlatforms}
 	err := push(ctx, cfg)
 	if err == nil {
 		return 0
@@ -131,10 +132,8 @@ func run() int {
 type pushConfig struct {
 	ImageRef  string
 	SSHTarget string
-	// Platform, if set, restricts the push to a specific platform manifest
-	// inside a multi-arch index and overrides remote platform detection for
-	// unpack.
-	Platform *ocispec.Platform
+	// Empty Platforms means "every platform locally present".
+	Platforms []ocispec.Platform
 }
 
 func push(ctx context.Context, cfg pushConfig) error {
@@ -144,7 +143,7 @@ func push(ctx context.Context, cfg pushConfig) error {
 	}
 	defer func() { _ = local.Close() }()
 
-	img, descs, err := local.resolveAndEnumerate(ctx, cfg.ImageRef, cfg.Platform)
+	img, descs, effective, err := local.resolveAndEnumerate(ctx, cfg.ImageRef, cfg.Platforms)
 	if err != nil {
 		return fmt.Errorf("resolve image: %w", err)
 	}
@@ -154,16 +153,6 @@ func push(ctx context.Context, cfg pushConfig) error {
 		return fmt.Errorf("open remote containerd: %w", err)
 	}
 	defer func() { _ = remote.Close() }()
-
-	var remotePlatform ocispec.Platform
-	if cfg.Platform != nil {
-		remotePlatform = *cfg.Platform
-	} else {
-		remotePlatform, err = remoteHostPlatform(ctx, remote)
-		if err != nil {
-			return fmt.Errorf("detect remote platform: %w", err)
-		}
-	}
 
 	fmt.Fprintf(os.Stderr, "Pushing %s to %s\n", cfg.ImageRef, cfg.SSHTarget)
 	start := time.Now()
@@ -178,7 +167,7 @@ func push(ctx context.Context, cfg pushConfig) error {
 		return transferBlobs(gctx, local, remote, descs, tracker, ps)
 	})
 	g.Go(func() error {
-		return unpackRemote(gctx, remote, waitStore, img, remotePlatform, descs, tracker, ps)
+		return unpackRemote(gctx, remote, waitStore, img, effective, descs, tracker, ps)
 	})
 	if err := g.Wait(); err != nil {
 		return err

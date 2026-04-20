@@ -23,8 +23,7 @@ import (
 // unpackRemote uses core/unpack on snapshotters that advertise the "rebase"
 // capability (containerd 2.2+). Older snapshotters need serial apply because
 // parallel unpack races on the parent chain.
-func unpackRemote(ctx context.Context, dst *remoteSink, store content.Store, img images.Image, plat ocispec.Platform, descs []ocispec.Descriptor, tracker *readiness, ps *progressState) error {
-	matcher := platforms.Only(plat)
+func unpackRemote(ctx context.Context, dst *remoteSink, store content.Store, img images.Image, plats []ocispec.Platform, descs []ocispec.Descriptor, tracker *readiness, ps *progressState) error {
 	// waitingApplier must be the outer wrapper so the Extracting label only
 	// fires after the layer has landed, not when apply is dispatched.
 	applier := &waitingApplier{
@@ -37,25 +36,26 @@ func unpackRemote(ctx context.Context, dst *remoteSink, store content.Store, img
 		return fmt.Errorf("query snapshotter: %w", err)
 	}
 	if slices.Contains(plugin.GetCapabilities(), "rebase") {
-		return unpackParallel(ctx, dst, store, img, matcher, applier, descs)
+		return unpackParallel(ctx, dst, store, img, unpackMatcher(plats), applier, descs)
 	}
-	return unpackSerial(ctx, dst, store, img, matcher, applier)
+	if len(plats) == 0 {
+		return unpackSerial(ctx, dst, store, img, platforms.All, applier)
+	}
+	for _, p := range plats {
+		if err := unpackSerial(ctx, dst, store, img, platforms.Only(p), applier); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-func remoteHostPlatform(ctx context.Context, dst *remoteSink) (ocispec.Platform, error) {
-	plugin, err := findSnapshotter(ctx, dst, remoteSnapshotter)
-	if err != nil {
-		return ocispec.Platform{}, err
-	}
-	plats := plugin.GetPlatforms()
+// unpackMatcher falls back to platforms.All when the caller has no filter;
+// descs already scopes the walk to the user's selection.
+func unpackMatcher(plats []ocispec.Platform) platforms.MatchComparer {
 	if len(plats) == 0 {
-		return ocispec.Platform{}, fmt.Errorf("snapshotter %q reports no platforms", remoteSnapshotter)
+		return platforms.All
 	}
-	return ocispec.Platform{
-		OS:           plats[0].GetOS(),
-		Architecture: plats[0].GetArchitecture(),
-		Variant:      plats[0].GetVariant(),
-	}, nil
+	return platforms.Any(plats...)
 }
 
 func findSnapshotter(ctx context.Context, dst *remoteSink, name string) (*introspectionapi.Plugin, error) {

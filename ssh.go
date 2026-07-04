@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/kevinburke/ssh_config"
@@ -21,6 +22,10 @@ import (
 
 type sshTunnel struct {
 	client *ssh.Client
+	// noStreamlocal records that the server rejected a
+	// direct-streamlocal@openssh.com channel, so later dials skip straight
+	// to the nc bridge.
+	noStreamlocal atomic.Bool
 }
 
 func openSSHTunnel(ctx context.Context, target string) (*sshTunnel, error) {
@@ -86,8 +91,27 @@ func (t *sshTunnel) queryRemoteCPUs() (int, error) {
 
 func (t *sshTunnel) dialer(socketPath string) func(ctx context.Context, _ string) (net.Conn, error) {
 	return func(ctx context.Context, _ string) (net.Conn, error) {
-		return dialViaBridge(ctx, t.client, socketPath)
+		return t.dialRemoteUnix(ctx, socketPath)
 	}
+}
+
+// dialRemoteUnix connects to a unix socket on the remote host. It prefers the
+// native direct-streamlocal@openssh.com channel and permanently falls back to
+// an exec'd `nc -U` bridge on servers that reject it (e.g. gliderlabs-based
+// servers such as Tailscale SSH).
+func (t *sshTunnel) dialRemoteUnix(ctx context.Context, path string) (net.Conn, error) {
+	if !t.noStreamlocal.Load() {
+		conn, err := dialWithContext(ctx, func() (net.Conn, error) {
+			return t.client.Dial("unix", path)
+		})
+		if err == nil || ctx.Err() != nil {
+			return conn, err
+		}
+		t.noStreamlocal.Store(true)
+	}
+	return dialWithContext(ctx, func() (net.Conn, error) {
+		return t.ncBridge(path)
+	})
 }
 
 // resolveTarget applies ~/.ssh/config overrides so Host aliases keep working.
@@ -179,46 +203,47 @@ func openKnownHosts() (*knownhosts.HostKeyDB, error) {
 	return knownhosts.NewDB(path)
 }
 
-// dialViaBridge relays stdin/stdout to the remote unix socket via `nc -U`
-// in an exec session. Avoids direct-streamlocal@openssh.com, which
-// gliderlabs/ssh (Tailscale SSH) rejects as an unknown channel type.
-func dialViaBridge(ctx context.Context, c *ssh.Client, path string) (net.Conn, error) {
+// ncBridge relays stdin/stdout to the remote unix socket via `nc -U` in an
+// exec session.
+func (t *sshTunnel) ncBridge(path string) (net.Conn, error) {
+	sess, err := t.client.NewSession()
+	if err != nil {
+		return nil, fmt.Errorf("ssh session: %w", err)
+	}
+	stdin, err := sess.StdinPipe()
+	if err != nil {
+		_ = sess.Close()
+		return nil, err
+	}
+	stdout, err := sess.StdoutPipe()
+	if err != nil {
+		_ = sess.Close()
+		return nil, err
+	}
+	// Without this, a missing or busybox nc surfaces only as EOF at grpc.
+	sess.Stderr = os.Stderr
+	if err := sess.Start("nc -U " + path); err != nil {
+		_ = sess.Close()
+		return nil, fmt.Errorf("start bridge: %w", err)
+	}
+	return &sessionConn{sess: sess, in: stdin, out: stdout}, nil
+}
+
+// dialWithContext runs dial, which has no context support, in a goroutine so
+// the caller can honor ctx. A late success after cancellation is closed
+// rather than leaked.
+func dialWithContext(ctx context.Context, dial func() (net.Conn, error)) (net.Conn, error) {
 	type result struct {
 		conn net.Conn
 		err  error
 	}
 	done := make(chan result, 1)
 	go func() {
-		sess, err := c.NewSession()
-		if err != nil {
-			done <- result{err: fmt.Errorf("ssh session: %w", err)}
-			return
-		}
-		stdin, err := sess.StdinPipe()
-		if err != nil {
-			_ = sess.Close()
-			done <- result{err: err}
-			return
-		}
-		stdout, err := sess.StdoutPipe()
-		if err != nil {
-			_ = sess.Close()
-			done <- result{err: err}
-			return
-		}
-		// Without this, a missing or busybox nc surfaces only as EOF at grpc.
-		sess.Stderr = os.Stderr
-		if err := sess.Start("nc -U " + path); err != nil {
-			_ = sess.Close()
-			done <- result{err: fmt.Errorf("start bridge: %w", err)}
-			return
-		}
-		done <- result{conn: &sessionConn{sess: sess, in: stdin, out: stdout}}
+		conn, err := dial()
+		done <- result{conn: conn, err: err}
 	}()
 	select {
 	case <-ctx.Done():
-		// The session goroutine may still complete; reap its result so the
-		// ssh session doesn't leak.
 		go func() {
 			if r := <-done; r.conn != nil {
 				_ = r.conn.Close()

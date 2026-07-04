@@ -15,12 +15,21 @@ import (
 
 func transferBlobs(ctx context.Context, src *localSource, dst *remoteSink, descs []ocispec.Descriptor, tracker *readiness, ps *progressState) error {
 	leaseCtx := leases.WithLease(ctx, dst.lease.ID)
-	store := dst.client.ContentStore()
+
+	// Pool of per-connection stores: with pool size equal to the concurrency
+	// limit, every in-flight upload gets a dedicated connection (and thus its
+	// own SSH channel; see remoteSink.uploads).
+	stores := make(chan content.Store, len(dst.uploads))
+	for _, u := range dst.uploads {
+		stores <- u.ContentStore()
+	}
 
 	g, gctx := errgroup.WithContext(leaseCtx)
-	g.SetLimit(uploadConcurrency)
+	g.SetLimit(len(dst.uploads))
 	for _, d := range descs {
 		g.Go(func() error {
+			store := <-stores
+			defer func() { stores <- store }()
 			if err := transferOne(gctx, src, store, d, ps.layerFor(d)); err != nil {
 				return err
 			}

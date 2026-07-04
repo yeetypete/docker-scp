@@ -40,7 +40,9 @@ const (
 	remoteNamespace      = "moby"
 	remoteSnapshotter    = "overlayfs"
 	localNamespace       = "moby"
-	uploadConcurrency    = 6
+	// uploadConcurrency is the number of concurrent blob uploads, each on a
+	// dedicated gRPC connection (its own SSH channel).
+	uploadConcurrency = 6
 )
 
 type pluginMetadata struct {

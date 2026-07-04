@@ -14,9 +14,15 @@ import (
 
 type remoteSink struct {
 	client *client.Client
-	tunnel *sshTunnel
-	lease  leases.Lease
-	cpus   int
+	// uploads are dedicated connections for blob data, one per concurrent
+	// upload. Each gRPC connection rides its own SSH channel, and SSH flow
+	// control caps in-flight data per channel at ~2 MiB, so a single shared
+	// channel would bound aggregate upload throughput at ~2 MiB per RTT.
+	// gRPC dials lazily; connections that are never used cost nothing.
+	uploads []*client.Client
+	tunnel  *sshTunnel
+	lease   leases.Lease
+	cpus    int
 }
 
 func openRemote(ctx context.Context, cfg pushConfig) (_ *remoteSink, retErr error) {
@@ -30,23 +36,23 @@ func openRemote(ctx context.Context, cfg pushConfig) (_ *remoteSink, retErr erro
 		}
 	}()
 
-	// Default HTTP/2 windows (64 KiB) cap per-stream throughput at window/RTT.
-	// Bumping both windows lets concurrent blob uploads saturate the link.
-	const (
-		grpcStreamWindow = 16 * 1024 * 1024
-		grpcConnWindow   = 64 * 1024 * 1024
-	)
-	// Address is a placeholder. Our context dialer ignores it and routes all
-	// connections through the SSH tunnel. Needs a leading slash so containerd's
-	// `unix://` prefix produces a valid URL (path, not authority).
-	c, err := client.New(containerdSocketPath,
-		client.WithDefaultNamespace(remoteNamespace),
-		client.WithExtraDialOpts([]grpc.DialOption{
-			grpc.WithContextDialer(tunnel.dialer(cfg.RemoteSocket)),
-			grpc.WithInitialWindowSize(grpcStreamWindow),
-			grpc.WithInitialConnWindowSize(grpcConnWindow),
-		}),
-	)
+	// The address is a placeholder: the context dialer ignores it and routes
+	// every connection through the SSH tunnel. It needs a leading slash so
+	// containerd's `unix://` prefix produces a valid URL (path, not
+	// authority). gRPC flow-control windows are left at their defaults: the
+	// client's windows only govern the (tiny) response direction, the
+	// remote's receive windows grow adaptively via BDP estimation, and the
+	// binding constraint is the SSH channel window anyway (see
+	// remoteSink.uploads).
+	newClient := func() (*client.Client, error) {
+		return client.New(cfg.RemoteSocket,
+			client.WithDefaultNamespace(remoteNamespace),
+			client.WithExtraDialOpts([]grpc.DialOption{
+				grpc.WithContextDialer(tunnel.dialer(cfg.RemoteSocket)),
+			}),
+		)
+	}
+	c, err := newClient()
 	if err != nil {
 		return nil, fmt.Errorf("containerd client: %w", err)
 	}
@@ -55,6 +61,22 @@ func openRemote(ctx context.Context, cfg pushConfig) (_ *remoteSink, retErr erro
 			_ = c.Close()
 		}
 	}()
+
+	uploads := make([]*client.Client, uploadConcurrency)
+	defer func() {
+		if retErr != nil {
+			for _, u := range uploads {
+				if u != nil {
+					_ = u.Close()
+				}
+			}
+		}
+	}()
+	for i := range uploads {
+		if uploads[i], err = newClient(); err != nil {
+			return nil, fmt.Errorf("containerd upload client: %w", err)
+		}
+	}
 
 	// containerd doesn't auto-create namespaces and most RPCs fail against a
 	// missing one.
@@ -79,12 +101,15 @@ func openRemote(ctx context.Context, cfg pushConfig) (_ *remoteSink, retErr erro
 		cpus = 4
 	}
 
-	return &remoteSink{client: c, tunnel: tunnel, lease: lease, cpus: cpus}, nil
+	return &remoteSink{client: c, uploads: uploads, tunnel: tunnel, lease: lease, cpus: cpus}, nil
 }
 
 func (r *remoteSink) Close() error {
 	// Best-effort lease cleanup. The 1h gc.expire.at label is the safety net.
 	_ = r.client.LeasesService().Delete(context.Background(), r.lease)
+	for _, u := range r.uploads {
+		_ = u.Close()
+	}
 	_ = r.client.Close()
 	return r.tunnel.Close()
 }

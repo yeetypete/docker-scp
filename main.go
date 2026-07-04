@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/containerd/containerd/v2/core/leases"
 	ctrdlog "github.com/containerd/log"
 	"github.com/containerd/platforms"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -172,7 +173,13 @@ func push(ctx context.Context, cfg pushConfig) error {
 	tracker := newReadiness(res.descs)
 	waitStore := &waitingStore{Store: remote.client.ContentStore(), ready: tracker}
 
-	g, gctx := errgroup.WithContext(ctx)
+	// Everything below creates remote resources (content ingests, snapshots)
+	// that nothing references until finalizeImage sets the gc.ref labels, so
+	// tie them all to the push lease or a concurrent remote GC can collect
+	// snapshots mid-unpack.
+	leaseCtx := leases.WithLease(ctx, remote.lease.ID)
+
+	g, gctx := errgroup.WithContext(leaseCtx)
 	g.Go(func() error {
 		return transferBlobs(gctx, local, remote, res.descs, tracker, ps)
 	})
@@ -183,7 +190,7 @@ func push(ctx context.Context, cfg pushConfig) error {
 		return err
 	}
 
-	if err := finalizeImage(ctx, remote, res.img, res.descs); err != nil {
+	if err := finalizeImage(leaseCtx, remote, res.img, res.descs); err != nil {
 		return fmt.Errorf("finalize image: %w", err)
 	}
 

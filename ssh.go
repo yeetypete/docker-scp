@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -26,6 +27,11 @@ type sshTunnel struct {
 	// direct-streamlocal@openssh.com channel, so later dials skip straight
 	// to the nc bridge.
 	noStreamlocal atomic.Bool
+	// ncSupportsN lazily probes (once) whether the remote nc supports -N,
+	// which shuts the socket down on stdin EOF. Without it bridge nc
+	// processes linger after the push: nothing else ever closes their
+	// socket side.
+	ncSupportsN func() bool
 }
 
 func openSSHTunnel(ctx context.Context, target string) (*sshTunnel, error) {
@@ -67,7 +73,19 @@ func openSSHTunnel(ctx context.Context, target string) (*sshTunnel, error) {
 		_ = conn.Close()
 		return nil, fmt.Errorf("ssh handshake %s: %w", addr, err)
 	}
-	return &sshTunnel{client: ssh.NewClient(c, chans, reqs)}, nil
+	t := &sshTunnel{client: ssh.NewClient(c, chans, reqs)}
+	t.ncSupportsN = sync.OnceValue(t.probeNC)
+	return t, nil
+}
+
+func (t *sshTunnel) probeNC() bool {
+	sess, err := t.client.NewSession()
+	if err != nil {
+		return false
+	}
+	defer func() { _ = sess.Close() }()
+	out, _ := sess.CombinedOutput("nc -h")
+	return strings.Contains(string(out), "-N")
 }
 
 func (t *sshTunnel) Close() error { return t.client.Close() }
@@ -222,7 +240,11 @@ func (t *sshTunnel) ncBridge(path string) (net.Conn, error) {
 	}
 	// Without this, a missing or busybox nc surfaces only as EOF at grpc.
 	sess.Stderr = os.Stderr
-	if err := sess.Start("nc -U " + path); err != nil {
+	cmd := "nc -U " + path
+	if t.ncSupportsN() {
+		cmd = "nc -N -U " + path
+	}
+	if err := sess.Start(cmd); err != nil {
 		_ = sess.Close()
 		return nil, fmt.Errorf("start bridge: %w", err)
 	}
@@ -267,6 +289,10 @@ func (c *sessionConn) Read(b []byte) (int, error)  { return c.out.Read(b) }
 func (c *sessionConn) Write(b []byte) (int, error) { return c.in.Write(b) }
 func (c *sessionConn) Close() error {
 	_ = c.in.Close()
+	// nc lingers after stdin EOF: it only exits once the remote socket
+	// closes, and containerd holds its side open indefinitely. Best-effort
+	// kill; servers without "signal" support ignore the request.
+	_ = c.sess.Signal(ssh.SIGKILL)
 	return c.sess.Close()
 }
 func (c *sessionConn) LocalAddr() net.Addr              { return sshSessionAddr{} }

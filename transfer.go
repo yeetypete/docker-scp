@@ -7,15 +7,13 @@ import (
 
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
-	"github.com/containerd/containerd/v2/core/leases"
 	"github.com/containerd/errdefs"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"golang.org/x/sync/errgroup"
 )
 
+// transferBlobs uploads descs to the remote. ctx must carry the push lease.
 func transferBlobs(ctx context.Context, src *localSource, dst *remoteSink, descs []ocispec.Descriptor, tracker *readiness, ps *progressState) error {
-	leaseCtx := leases.WithLease(ctx, dst.lease.ID)
-
 	// Pool of per-connection stores: with pool size equal to the concurrency
 	// limit, every in-flight upload gets a dedicated connection (and thus its
 	// own SSH channel; see remoteSink.uploads).
@@ -24,7 +22,7 @@ func transferBlobs(ctx context.Context, src *localSource, dst *remoteSink, descs
 		stores <- u.ContentStore()
 	}
 
-	g, gctx := errgroup.WithContext(leaseCtx)
+	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(len(dst.uploads))
 	for _, d := range descs {
 		g.Go(func() error {

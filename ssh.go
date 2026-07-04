@@ -84,29 +84,21 @@ func (t *sshTunnel) queryRemoteCPUs() (int, error) {
 	return n, nil
 }
 
-func (t *sshTunnel) dialer() func(ctx context.Context, _ string) (net.Conn, error) {
+func (t *sshTunnel) dialer(socketPath string) func(ctx context.Context, _ string) (net.Conn, error) {
 	return func(ctx context.Context, _ string) (net.Conn, error) {
-		return dialViaBridge(ctx, t.client, containerdSocketPath)
+		return dialViaBridge(ctx, t.client, socketPath)
 	}
 }
 
 // resolveTarget applies ~/.ssh/config overrides so Host aliases keep working.
+// Config lookups use the host as typed (the alias), matching OpenSSH; the
+// HostName substitution happens last.
 func resolveTarget(target string) (string, string, string, error) {
-	u, hostport := "", target
-	if at := strings.IndexByte(target, '@'); at >= 0 {
-		u, hostport = target[:at], target[at+1:]
-	}
-	host, port, err := net.SplitHostPort(hostport)
-	if err != nil {
-		host, port = hostport, ""
-	}
+	u, host, port := parseTarget(target)
 	if host == "" {
 		return "", "", "", fmt.Errorf("ssh target %q: missing host", target)
 	}
 
-	if alias := ssh_config.Get(host, "HostName"); alias != "" {
-		host = alias
-	}
 	if u == "" {
 		u = ssh_config.Get(host, "User")
 	}
@@ -123,7 +115,23 @@ func resolveTarget(target string) (string, string, string, error) {
 	if port == "" {
 		port = "22"
 	}
+	if hostname := ssh_config.Get(host, "HostName"); hostname != "" {
+		host = hostname
+	}
 	return u, host, port, nil
+}
+
+// parseTarget splits [USER@]HOST[:PORT], leaving absent parts empty.
+func parseTarget(target string) (user, host, port string) {
+	hostport := target
+	if before, after, ok := strings.Cut(target, "@"); ok {
+		user, hostport = before, after
+	}
+	host, port, err := net.SplitHostPort(hostport)
+	if err != nil {
+		host, port = hostport, ""
+	}
+	return user, host, port
 }
 
 func sshAuthMethods() ([]ssh.AuthMethod, error) {
@@ -209,6 +217,13 @@ func dialViaBridge(ctx context.Context, c *ssh.Client, path string) (net.Conn, e
 	}()
 	select {
 	case <-ctx.Done():
+		// The session goroutine may still complete; reap its result so the
+		// ssh session doesn't leak.
+		go func() {
+			if r := <-done; r.conn != nil {
+				_ = r.conn.Close()
+			}
+		}()
 		return nil, ctx.Err()
 	case r := <-done:
 		return r.conn, r.err

@@ -40,26 +40,32 @@ func unpackRemote(ctx context.Context, dst *remoteSink, store content.Store, img
 	// Flip bars for layers whose chain is already unpacked, independently of
 	// the unpacker's serialized topHalf loop.
 	sn := dst.client.SnapshotService(remoteSnapshotter)
-	if len(plats) == 0 {
-		scanExistingChains(ctx, store, sn, img, platforms.All, ps)
-	} else {
-		for _, p := range plats {
-			scanExistingChains(ctx, store, sn, img, platforms.Only(p), ps)
-		}
+	for _, m := range matchersFor(plats) {
+		scanExistingChains(ctx, store, sn, img, m, ps)
 	}
 
 	if slices.Contains(plugin.GetCapabilities(), "rebase") {
 		return unpackParallel(ctx, dst, store, img, unpackMatcher(plats), applier, descs)
 	}
-	if len(plats) == 0 {
-		return unpackSerial(ctx, dst, store, img, platforms.All, applier)
-	}
-	for _, p := range plats {
-		if err := unpackSerial(ctx, dst, store, img, platforms.Only(p), applier); err != nil {
+	for _, m := range matchersFor(plats) {
+		if err := unpackSerial(ctx, dst, store, img, m, applier); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// matchersFor returns one matcher per requested platform, or platforms.All
+// when the caller has no filter.
+func matchersFor(plats []ocispec.Platform) []platforms.MatchComparer {
+	if len(plats) == 0 {
+		return []platforms.MatchComparer{platforms.All}
+	}
+	ms := make([]platforms.MatchComparer, len(plats))
+	for i, p := range plats {
+		ms[i] = platforms.Only(p)
+	}
+	return ms
 }
 
 // scanExistingChains walks the image's layer chain for the matched platform

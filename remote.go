@@ -42,7 +42,7 @@ func openRemote(ctx context.Context, cfg pushConfig) (_ *remoteSink, retErr erro
 	c, err := client.New(containerdSocketPath,
 		client.WithDefaultNamespace(remoteNamespace),
 		client.WithExtraDialOpts([]grpc.DialOption{
-			grpc.WithContextDialer(tunnel.dialer()),
+			grpc.WithContextDialer(tunnel.dialer(cfg.RemoteSocket)),
 			grpc.WithInitialWindowSize(grpcStreamWindow),
 			grpc.WithInitialConnWindowSize(grpcConnWindow),
 		}),

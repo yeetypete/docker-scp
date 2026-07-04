@@ -29,8 +29,10 @@ const usage = `Usage:  docker scp [OPTIONS] IMAGE [USER@]HOST[:PORT]
 Push an image directly to a remote containerd over SSH
 
 Options:
-      --platform strings   Push specific platforms of a multi-platform image
-                           (comma-separated, e.g. linux/amd64,linux/arm64)`
+      --local-socket string    Local containerd socket path (default "/run/containerd/containerd.sock")
+      --platform strings       Push specific platforms of a multi-platform image
+                               (comma-separated, e.g. linux/amd64,linux/arm64)
+      --remote-socket string   Remote containerd socket path (default "/run/containerd/containerd.sock")`
 
 const (
 	version              = "0.0.1"
@@ -50,9 +52,7 @@ type pluginMetadata struct {
 }
 
 func main() {
-	if code := run(); code != 0 {
-		os.Exit(code)
-	}
+	os.Exit(run())
 }
 
 func run() int {
@@ -61,13 +61,11 @@ func run() int {
 	// Docker CLI plugins get their subcommand name as the first arg. Strip
 	// it so the rest of argv matches what the user typed.
 	bin := filepath.Base(os.Args[0])
-	if strings.HasPrefix(bin, "docker-") && len(args) > 0 {
-		if args[0] == strings.TrimPrefix(bin, "docker-") {
-			args = args[1:]
-		}
+	if sub, ok := strings.CutPrefix(bin, "docker-"); ok && len(args) > 0 && args[0] == sub {
+		args = args[1:]
 	}
 
-	if len(args) >= 1 && args[0] == "docker-cli-plugin-metadata" {
+	if len(args) > 0 && args[0] == "docker-cli-plugin-metadata" {
 		if err := json.NewEncoder(os.Stdout).Encode(pluginMetadata{
 			SchemaVersion:    "0.1.0",
 			Vendor:           "scp",
@@ -84,6 +82,8 @@ func run() int {
 	fs := pflag.NewFlagSet("docker scp", pflag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	platformStrs := fs.StringSlice("platform", nil, "")
+	localSocket := fs.String("local-socket", containerdSocketPath, "")
+	remoteSocket := fs.String("remote-socket", containerdSocketPath, "")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, pflag.ErrHelp) {
 			_, _ = fmt.Fprintln(os.Stdout, usage)
@@ -116,7 +116,13 @@ func run() int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	cfg := pushConfig{ImageRef: positional[0], SSHTarget: positional[1], Platforms: reqPlatforms}
+	cfg := pushConfig{
+		ImageRef:     positional[0],
+		SSHTarget:    positional[1],
+		Platforms:    reqPlatforms,
+		LocalSocket:  *localSocket,
+		RemoteSocket: *remoteSocket,
+	}
 	err := push(ctx, cfg)
 	if err == nil {
 		return 0
@@ -133,17 +139,19 @@ type pushConfig struct {
 	ImageRef  string
 	SSHTarget string
 	// Empty Platforms means "every platform locally present".
-	Platforms []ocispec.Platform
+	Platforms    []ocispec.Platform
+	LocalSocket  string
+	RemoteSocket string
 }
 
 func push(ctx context.Context, cfg pushConfig) error {
-	local, err := openLocal()
+	local, err := openLocal(cfg.LocalSocket)
 	if err != nil {
 		return fmt.Errorf("open local containerd: %w", err)
 	}
 	defer func() { _ = local.Close() }()
 
-	img, descs, effective, err := local.resolveAndEnumerate(ctx, cfg.ImageRef, cfg.Platforms)
+	res, err := local.resolveAndEnumerate(ctx, cfg.ImageRef, cfg.Platforms)
 	if err != nil {
 		return fmt.Errorf("resolve image: %w", err)
 	}
@@ -159,21 +167,21 @@ func push(ctx context.Context, cfg pushConfig) error {
 	prog := mpb.New(mpb.WithOutput(os.Stderr), mpb.WithWidth(40))
 	ps := newProgressState(prog)
 
-	tracker := newReadiness(descs)
+	tracker := newReadiness(res.descs)
 	waitStore := &waitingStore{Store: remote.client.ContentStore(), ready: tracker}
 
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
-		return transferBlobs(gctx, local, remote, descs, tracker, ps)
+		return transferBlobs(gctx, local, remote, res.descs, tracker, ps)
 	})
 	g.Go(func() error {
-		return unpackRemote(gctx, remote, waitStore, img, effective, descs, tracker, ps)
+		return unpackRemote(gctx, remote, waitStore, res.img, res.platforms, res.descs, tracker, ps)
 	})
 	if err := g.Wait(); err != nil {
 		return err
 	}
 
-	if err := finalizeImage(ctx, remote, img, descs); err != nil {
+	if err := finalizeImage(ctx, remote, res.img, res.descs); err != nil {
 		return fmt.Errorf("finalize image: %w", err)
 	}
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/containerd/containerd/v2/client"
@@ -12,6 +13,7 @@ import (
 	"github.com/containerd/errdefs"
 	"github.com/containerd/platforms"
 	"github.com/distribution/reference"
+	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
@@ -19,13 +21,13 @@ type localSource struct {
 	client *client.Client
 }
 
-func openLocal() (*localSource, error) {
-	if _, err := os.Stat(containerdSocketPath); err != nil {
-		return nil, fmt.Errorf("local containerd socket %s: %w", containerdSocketPath, err)
+func openLocal(socketPath string) (*localSource, error) {
+	if _, err := os.Stat(socketPath); err != nil {
+		return nil, fmt.Errorf("local containerd socket %s: %w", socketPath, err)
 	}
-	c, err := client.New(containerdSocketPath, client.WithDefaultNamespace(localNamespace))
+	c, err := client.New(socketPath, client.WithDefaultNamespace(localNamespace))
 	if err != nil {
-		return nil, fmt.Errorf("connect %s: %w", containerdSocketPath, err)
+		return nil, fmt.Errorf("connect %s: %w", socketPath, err)
 	}
 	return &localSource{client: c}, nil
 }
@@ -36,18 +38,26 @@ func (l *localSource) ReaderAt(ctx context.Context, desc ocispec.Descriptor) (co
 
 func (l *localSource) Close() error { return l.client.Close() }
 
-// resolveAndEnumerate returns the descriptors to transfer and the effective
-// platforms for unpack. Empty requested means "every platform locally present".
-func (l *localSource) resolveAndEnumerate(ctx context.Context, ref string, requested []ocispec.Platform) (images.Image, []ocispec.Descriptor, []ocispec.Platform, error) {
+// resolvedImage is the outcome of resolveAndEnumerate: the image record, the
+// descriptors to transfer, and the effective platforms for unpack.
+type resolvedImage struct {
+	img       images.Image
+	descs     []ocispec.Descriptor
+	platforms []ocispec.Platform
+}
+
+// resolveAndEnumerate resolves ref in the local containerd and enumerates the
+// content to transfer. Empty requested means "every platform locally present".
+func (l *localSource) resolveAndEnumerate(ctx context.Context, ref string, requested []ocispec.Platform) (resolvedImage, error) {
 	named, err := reference.ParseDockerRef(ref)
 	if err != nil {
-		return images.Image{}, nil, nil, fmt.Errorf("parse ref: %w", err)
+		return resolvedImage{}, fmt.Errorf("parse ref: %w", err)
 	}
 	canonical := named.String()
 
 	img, err := l.client.ImageService().Get(ctx, canonical)
 	if err != nil {
-		return images.Image{}, nil, nil, fmt.Errorf("image %q not found in local containerd: %w", canonical, err)
+		return resolvedImage{}, fmt.Errorf("image %q not found in local containerd: %w", canonical, err)
 	}
 
 	store := l.client.ContentStore()
@@ -56,12 +66,12 @@ func (l *localSource) resolveAndEnumerate(ctx context.Context, ref string, reque
 	// errors cleanly here instead of deep in unpack as "content not found".
 	localPlats, err := localIndexPlatforms(ctx, store, img.Target)
 	if err != nil {
-		return images.Image{}, nil, nil, fmt.Errorf("enumerate index: %w", err)
+		return resolvedImage{}, fmt.Errorf("enumerate index: %w", err)
 	}
 	if len(requested) > 0 && len(localPlats) > 0 {
 		for _, p := range requested {
 			if !anyMatches(p, localPlats) {
-				return images.Image{}, nil, nil, fmt.Errorf(
+				return resolvedImage{}, fmt.Errorf(
 					"local image has no %s variant. Available: %s",
 					platforms.Format(p), formatPlatforms(localPlats))
 			}
@@ -74,7 +84,15 @@ func (l *localSource) resolveAndEnumerate(ctx context.Context, ref string, reque
 	}
 
 	var descs []ocispec.Descriptor
+	seen := make(map[digest.Digest]bool)
 	handler := images.HandlerFunc(func(ctx context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
+		// A blob can be reachable through several parents (e.g. a layer shared
+		// by two platform manifests). Visit it once: duplicates in descs would
+		// tie up an upload slot spin-waiting on the ingest ref lock.
+		if seen[desc.Digest] {
+			return nil, images.ErrSkipDesc
+		}
+		seen[desc.Digest] = true
 		descs = append(descs, desc)
 		children, err := images.Children(ctx, store, desc)
 		if err != nil {
@@ -101,13 +119,14 @@ func (l *localSource) resolveAndEnumerate(ctx context.Context, ref string, reque
 		return kept, nil
 	})
 	if err := images.Walk(ctx, handler, img.Target); err != nil {
-		return images.Image{}, nil, nil, fmt.Errorf("walk image: %w", err)
+		return resolvedImage{}, fmt.Errorf("walk image: %w", err)
 	}
 
+	effective := localPlats
 	if len(requested) > 0 {
-		return img, descs, requested, nil
+		effective = requested
 	}
-	return img, descs, localPlats, nil
+	return resolvedImage{img: img, descs: descs, platforms: effective}, nil
 }
 
 // localIndexPlatforms returns platforms of index children whose manifest is
@@ -142,13 +161,7 @@ func localIndexPlatforms(ctx context.Context, store content.Store, target ocispe
 }
 
 func anyMatches(p ocispec.Platform, candidates []ocispec.Platform) bool {
-	m := platforms.Only(p)
-	for _, c := range candidates {
-		if m.Match(c) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(candidates, platforms.Only(p).Match)
 }
 
 func formatPlatforms(ps []ocispec.Platform) string {

@@ -67,8 +67,8 @@ func TestDialWithContextCancelReapsLateConn(t *testing.T) {
 		t.Fatalf("dialWithContext err = %v, want context.Canceled", err)
 	}
 
-	// Once the late dial completes, the reaper must close the conn; the pipe
-	// peer observes that as EOF.
+	// Once the late dial completes, the reaper must close the conn. The
+	// pipe peer observes that as EOF.
 	close(release)
 	_ = b.SetReadDeadline(time.Now().Add(5 * time.Second))
 	if _, err := b.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {

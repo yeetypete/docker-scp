@@ -98,10 +98,9 @@ func (l *localSource) resolveAndEnumerate(ctx context.Context, ref string, reque
 		if err != nil {
 			return nil, err
 		}
-		// Only follow children whose content is locally present. This naturally
-		// scopes the transfer to whatever platform(s) the user pulled locally.
-		// When --platform is set, further restrict to descriptors matching it
-		// (index entries carry a Platform, config/layer children don't).
+		// Following only locally-present children scopes the transfer to the
+		// platforms the user actually pulled. Index entries carry a Platform
+		// for the --platform filter, config and layer children don't.
 		kept := children[:0]
 		for _, c := range children {
 			if matcher != nil && c.Platform != nil && !matcher.Match(*c.Platform) {

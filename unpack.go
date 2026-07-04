@@ -22,8 +22,8 @@ import (
 )
 
 // unpackRemote uses core/unpack on snapshotters that advertise the "rebase"
-// capability (containerd 2.2+). Older snapshotters need serial apply because
-// parallel unpack races on the parent chain.
+// capability (containerd 2.2+). Older snapshotters unpack serially because
+// a layer snapshot can only be prepared once its parent chain is committed.
 func unpackRemote(ctx context.Context, dst *remoteSink, store content.Store, img images.Image, plats []ocispec.Platform, descs []ocispec.Descriptor, tracker *readiness, ps *progressState) error {
 	// waitingApplier must be the outer wrapper so the Extracting label only
 	// fires after the layer has landed, not when apply is dispatched.
@@ -98,8 +98,8 @@ func scanExistingChains(ctx context.Context, store content.Store, sn snapshots.S
 	}
 }
 
-// unpackMatcher falls back to platforms.All when the caller has no filter;
-// descs already scopes the walk to the user's selection.
+// unpackMatcher falls back to platforms.All when the caller has no filter.
+// The descs list already scopes the walk to the user's selection.
 func unpackMatcher(plats []ocispec.Platform) platforms.MatchComparer {
 	if len(plats) == 0 {
 		return platforms.All

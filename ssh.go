@@ -133,8 +133,8 @@ func (t *sshTunnel) dialRemoteUnix(ctx context.Context, path string) (net.Conn, 
 }
 
 // resolveTarget applies ~/.ssh/config overrides so Host aliases keep working.
-// Config lookups use the host as typed (the alias), matching OpenSSH; the
-// HostName substitution happens last.
+// Config lookups use the host as typed (the alias), matching OpenSSH, and
+// the HostName substitution happens last.
 func resolveTarget(target string) (string, string, string, error) {
 	u, host, port := parseTarget(target)
 	if host == "" {
@@ -278,7 +278,8 @@ func dialWithContext(ctx context.Context, dial func() (net.Conn, error)) (net.Co
 }
 
 // sessionConn adapts an ssh.Session's stdio to net.Conn. Set*Deadline are
-// no-ops since gRPC manages its own timeouts via contexts.
+// no-ops, which only costs gRPC its time bound on shutdown writes, and
+// Close tears the session down regardless.
 type sessionConn struct {
 	sess *ssh.Session
 	in   io.WriteCloser
@@ -290,8 +291,8 @@ func (c *sessionConn) Write(b []byte) (int, error) { return c.in.Write(b) }
 func (c *sessionConn) Close() error {
 	_ = c.in.Close()
 	// nc lingers after stdin EOF: it only exits once the remote socket
-	// closes, and containerd holds its side open indefinitely. Best-effort
-	// kill; servers without "signal" support ignore the request.
+	// closes, and containerd holds its side open indefinitely. The kill is
+	// best-effort since servers without "signal" support ignore it.
 	_ = c.sess.Signal(ssh.SIGKILL)
 	return c.sess.Close()
 }

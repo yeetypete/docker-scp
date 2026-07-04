@@ -15,10 +15,9 @@ import (
 type remoteSink struct {
 	client *client.Client
 	// uploads are dedicated connections for blob data, one per concurrent
-	// upload. Each gRPC connection rides its own SSH channel, and SSH flow
-	// control caps in-flight data per channel at ~2 MiB, so a single shared
-	// channel would bound aggregate upload throughput at ~2 MiB per RTT.
-	// gRPC dials lazily; connections that are never used cost nothing.
+	// upload. SSH flow control caps in-flight data per channel at ~2 MiB,
+	// so a single shared channel would bound aggregate upload throughput at
+	// ~2 MiB per RTT. gRPC dials lazily so unused connections cost nothing.
 	uploads []*client.Client
 	tunnel  *sshTunnel
 	lease   leases.Lease
@@ -36,14 +35,12 @@ func openRemote(ctx context.Context, cfg pushConfig) (_ *remoteSink, retErr erro
 		}
 	}()
 
-	// The address is a placeholder: the context dialer ignores it and routes
-	// every connection through the SSH tunnel. It needs a leading slash so
-	// containerd's `unix://` prefix produces a valid URL (path, not
-	// authority). gRPC flow-control windows are left at their defaults: the
-	// client's windows only govern the (tiny) response direction, the
-	// remote's receive windows grow adaptively via BDP estimation, and the
-	// binding constraint is the SSH channel window anyway (see
-	// remoteSink.uploads).
+	// The address is a placeholder. The context dialer ignores it and routes
+	// every connection through the SSH tunnel, but it needs a leading slash
+	// so containerd's `unix://` prefix produces a valid URL. gRPC flow
+	// control stays at its defaults: the client's windows only govern the
+	// tiny response direction, the remote grows its receive windows via BDP
+	// estimation, and the SSH channel window binds first anyway.
 	newClient := func() (*client.Client, error) {
 		return client.New(cfg.RemoteSocket,
 			client.WithDefaultNamespace(remoteNamespace),
@@ -105,7 +102,7 @@ func openRemote(ctx context.Context, cfg pushConfig) (_ *remoteSink, retErr erro
 }
 
 func (r *remoteSink) Close() error {
-	// Best-effort lease cleanup. The 1h gc.expire.at label is the safety net.
+	// Best-effort lease cleanup. The 1h gc.expire label is the safety net.
 	_ = r.client.LeasesService().Delete(context.Background(), r.lease)
 	for _, u := range r.uploads {
 		_ = u.Close()

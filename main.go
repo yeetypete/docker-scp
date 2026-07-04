@@ -173,10 +173,9 @@ func push(ctx context.Context, cfg pushConfig) error {
 	tracker := newReadiness(res.descs)
 	waitStore := &waitingStore{Store: remote.client.ContentStore(), ready: tracker}
 
-	// Everything below creates remote resources (content ingests, snapshots)
-	// that nothing references until finalizeImage sets the gc.ref labels, so
-	// tie them all to the push lease or a concurrent remote GC can collect
-	// snapshots mid-unpack.
+	// Nothing references the remote content and snapshots created below
+	// until finalizeImage sets the gc.ref labels, so tie them to the push
+	// lease or a concurrent remote GC can collect them mid-push.
 	leaseCtx := leases.WithLease(ctx, remote.lease.ID)
 
 	g, gctx := errgroup.WithContext(leaseCtx)

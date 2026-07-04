@@ -14,9 +14,8 @@ import (
 
 // transferBlobs uploads descs to the remote. ctx must carry the push lease.
 func transferBlobs(ctx context.Context, src *localSource, dst *remoteSink, descs []ocispec.Descriptor, tracker *readiness, ps *progressState) error {
-	// Pool of per-connection stores: with pool size equal to the concurrency
-	// limit, every in-flight upload gets a dedicated connection (and thus its
-	// own SSH channel; see remoteSink.uploads).
+	// Sized to the concurrency limit so every in-flight upload gets a
+	// dedicated connection (see remoteSink.uploads).
 	stores := make(chan content.Store, len(dst.uploads))
 	for _, u := range dst.uploads {
 		stores <- u.ContentStore()

@@ -42,7 +42,7 @@ func main() {
 		Vendor:           "scp",
 		Version:          version,
 		ShortDescription: "Push images directly to a remote containerd over SSH",
-		URL:              "https://github.com/yeetypete/scp",
+		URL:              "https://github.com/yeetypete/docker-scp",
 	})
 }
 

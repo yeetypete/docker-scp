@@ -1,0 +1,21 @@
+version: 2
+
+project_name: docker-scp
+
+builds:
+  - binary: docker-scp
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+
+changelog:
+  use: github
+
+release:
+  prerelease: auto

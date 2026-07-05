@@ -69,6 +69,10 @@ If a containerd socket lives somewhere else (e.g. a rootless containerd under
 `$XDG_RUNTIME_DIR`), point the plugin at it with `--local-socket` /
 `--remote-socket`.
 
+When the SSH server does not allow unix socket forwarding (e.g. Tailscale
+SSH), the remote also needs `nc` from netcat-openbsd 1.130 or newer (Ubuntu
+18.04+, Debian stretch+).
+
 ### Adding a containerd Group
 
 Run these steps on **both machines**. Create a `containerd` group and add

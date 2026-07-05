@@ -271,11 +271,9 @@ type sessionConn struct {
 func (c *sessionConn) Read(b []byte) (int, error)  { return c.out.Read(b) }
 func (c *sessionConn) Write(b []byte) (int, error) { return c.in.Write(b) }
 func (c *sessionConn) Close() error {
+	// Closing stdin is what ends the bridge: nc -N reacts to the EOF by
+	// shutting down the socket and exiting.
 	_ = c.in.Close()
-	// nc lingers after stdin EOF: it only exits once the remote socket
-	// closes, and containerd holds its side open indefinitely. The kill is
-	// best-effort since servers without "signal" support ignore it.
-	_ = c.sess.Signal(ssh.SIGKILL)
 	return c.sess.Close()
 }
 func (c *sessionConn) LocalAddr() net.Addr              { return sshSessionAddr{} }

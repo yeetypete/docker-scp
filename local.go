@@ -68,6 +68,9 @@ func (l *localSource) resolveAndEnumerate(ctx context.Context, ref string, reque
 	if err != nil {
 		return resolvedImage{}, fmt.Errorf("enumerate index: %w", err)
 	}
+	if images.IsIndexType(img.Target.MediaType) && len(localPlats) == 0 {
+		return resolvedImage{}, fmt.Errorf("image %q has no platform variant fully present in local containerd", canonical)
+	}
 	if len(requested) > 0 && len(localPlats) > 0 {
 		for _, p := range requested {
 			if !anyMatches(p, localPlats) {
@@ -106,8 +109,19 @@ func (l *localSource) resolveAndEnumerate(ctx context.Context, ref string, reque
 			if matcher != nil && c.Platform != nil && !matcher.Match(*c.Platform) {
 				continue
 			}
-			_, err := store.Info(ctx, c.Digest)
-			if err != nil {
+			// Manifests count only when their whole subtree is local. Docker's
+			// containerd store can hold a sibling platform's manifest json
+			// without its content, and pushing that bare manifest leaves the
+			// remote referencing blobs that were never transferred.
+			if images.IsManifestType(c.MediaType) {
+				ok, err := manifestComplete(ctx, store, c)
+				if err != nil {
+					return nil, err
+				}
+				if !ok {
+					continue
+				}
+			} else if _, err := store.Info(ctx, c.Digest); err != nil {
 				if errdefs.IsNotFound(err) {
 					continue
 				}
@@ -128,35 +142,42 @@ func (l *localSource) resolveAndEnumerate(ctx context.Context, ref string, reque
 	return resolvedImage{img: img, descs: descs, platforms: effective}, nil
 }
 
-// localIndexPlatforms returns platforms of index children whose manifest is
-// locally present. Empty for single-manifest images.
-func localIndexPlatforms(ctx context.Context, store content.Store, target ocispec.Descriptor) ([]ocispec.Platform, error) {
+// localIndexPlatforms returns the platforms an index declares that are fully
+// present locally. Empty for single-manifest images. Checking with Only
+// mirrors how unpack resolves manifests later, so a platform counts exactly
+// when its unpack would find all content.
+func localIndexPlatforms(ctx context.Context, store content.Provider, target ocispec.Descriptor) ([]ocispec.Platform, error) {
 	if !images.IsIndexType(target.MediaType) {
 		return nil, nil
 	}
-	children, err := images.Children(ctx, store, target)
+	declared, err := images.Platforms(ctx, store, target)
 	if err != nil {
 		return nil, err
 	}
 	var present []ocispec.Platform
-	for _, c := range children {
-		if c.Platform == nil {
-			continue
-		}
-		// Skip BuildKit attestation manifests, matching images.Platforms.
-		if c.Platform.OS == "unknown" || c.Platform.Architecture == "unknown" {
-			continue
-		}
-		_, err := store.Info(ctx, c.Digest)
-		if errdefs.IsNotFound(err) {
-			continue
-		}
+	for _, p := range declared {
+		available, _, _, missing, err := images.Check(ctx, store, target, platforms.Only(p))
 		if err != nil {
 			return nil, err
 		}
-		present = append(present, *c.Platform)
+		if available && len(missing) == 0 {
+			present = append(present, p)
+		}
 	}
 	return present, nil
+}
+
+// manifestComplete reports whether the manifest and its config and layers
+// are all present in store. A bare presence check on the manifest blob
+// misclassifies platforms: Docker's containerd store keeps sibling platform
+// manifests whose content was never pulled. Check leaves available true when
+// only blobs are missing, so both results matter.
+func manifestComplete(ctx context.Context, store content.Provider, desc ocispec.Descriptor) (bool, error) {
+	available, _, _, missing, err := images.Check(ctx, store, desc, platforms.All)
+	if err != nil {
+		return false, err
+	}
+	return available && len(missing) == 0, nil
 }
 
 func anyMatches(p ocispec.Platform, candidates []ocispec.Platform) bool {

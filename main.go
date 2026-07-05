@@ -102,14 +102,10 @@ func run() int {
 		return 2
 	}
 
-	var reqPlatforms []ocispec.Platform
-	for _, s := range *platformStrs {
-		p, err := platforms.Parse(s)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "invalid --platform %q: %v\n", s, err)
-			return 2
-		}
-		reqPlatforms = append(reqPlatforms, p)
+	reqPlatforms, err := platforms.ParseAll(*platformStrs)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "--platform: %v\n", err)
+		return 2
 	}
 
 	// Suppress containerd's internal log lines (snapshot cleanup noise on
@@ -126,7 +122,7 @@ func run() int {
 		LocalSocket:  *localSocket,
 		RemoteSocket: *remoteSocket,
 	}
-	err := push(ctx, cfg)
+	err = push(ctx, cfg)
 	if err == nil {
 		return 0
 	}

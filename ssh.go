@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -27,11 +26,6 @@ type sshTunnel struct {
 	// direct-streamlocal@openssh.com channel, so later dials skip straight
 	// to the nc bridge.
 	noStreamlocal atomic.Bool
-	// ncSupportsN lazily probes (once) whether the remote nc supports -N,
-	// which shuts the socket down on stdin EOF. Without it bridge nc
-	// processes linger after the push: nothing else ever closes their
-	// socket side.
-	ncSupportsN func() bool
 }
 
 func openSSHTunnel(ctx context.Context, target string) (*sshTunnel, error) {
@@ -73,19 +67,7 @@ func openSSHTunnel(ctx context.Context, target string) (*sshTunnel, error) {
 		_ = conn.Close()
 		return nil, fmt.Errorf("ssh handshake %s: %w", addr, err)
 	}
-	t := &sshTunnel{client: ssh.NewClient(c, chans, reqs)}
-	t.ncSupportsN = sync.OnceValue(t.probeNC)
-	return t, nil
-}
-
-func (t *sshTunnel) probeNC() bool {
-	sess, err := t.client.NewSession()
-	if err != nil {
-		return false
-	}
-	defer func() { _ = sess.Close() }()
-	out, _ := sess.CombinedOutput("nc -h")
-	return strings.Contains(string(out), "-N")
+	return &sshTunnel{client: ssh.NewClient(c, chans, reqs)}, nil
 }
 
 func (t *sshTunnel) Close() error { return t.client.Close() }
@@ -238,13 +220,13 @@ func (t *sshTunnel) ncBridge(path string) (net.Conn, error) {
 		_ = sess.Close()
 		return nil, err
 	}
-	// Without this, a missing or busybox nc surfaces only as EOF at grpc.
+	// Without this, an incompatible or missing nc surfaces only as EOF at
+	// grpc.
 	sess.Stderr = os.Stderr
-	cmd := "nc -U " + path
-	if t.ncSupportsN() {
-		cmd = "nc -N -U " + path
-	}
-	if err := sess.Start(cmd); err != nil {
+	// -N shuts the socket down on stdin EOF so the bridge exits with the
+	// connection instead of lingering. netcat-openbsd has it since Ubuntu
+	// 18.04 and Debian stretch, and the variants without it lack -U anyway.
+	if err := sess.Start("nc -N -U " + path); err != nil {
 		_ = sess.Close()
 		return nil, fmt.Errorf("start bridge: %w", err)
 	}

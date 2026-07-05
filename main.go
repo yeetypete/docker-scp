@@ -167,7 +167,7 @@ func push(ctx context.Context, cfg pushConfig) error {
 
 	fmt.Fprintf(os.Stderr, "Pushing %s to %s\n", cfg.ImageRef, cfg.SSHTarget)
 	start := time.Now()
-	prog := mpb.New(mpb.WithOutput(os.Stderr), mpb.WithWidth(40))
+	prog := mpb.New(mpb.WithOutput(os.Stderr), mpb.WithWidth(40), mpb.PopCompletedMode())
 	ps := newProgressState(prog)
 
 	tracker := newReadiness(res.descs)

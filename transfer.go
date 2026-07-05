@@ -7,20 +7,26 @@ import (
 
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
-	"github.com/containerd/containerd/v2/core/leases"
 	"github.com/containerd/errdefs"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"golang.org/x/sync/errgroup"
 )
 
+// transferBlobs uploads descs to the remote. ctx must carry the push lease.
 func transferBlobs(ctx context.Context, src *localSource, dst *remoteSink, descs []ocispec.Descriptor, tracker *readiness, ps *progressState) error {
-	leaseCtx := leases.WithLease(ctx, dst.lease.ID)
-	store := dst.client.ContentStore()
+	// Sized to the concurrency limit so every in-flight upload gets a
+	// dedicated connection (see remoteSink.uploads).
+	stores := make(chan content.Store, len(dst.uploads))
+	for _, u := range dst.uploads {
+		stores <- u.ContentStore()
+	}
 
-	g, gctx := errgroup.WithContext(leaseCtx)
-	g.SetLimit(uploadConcurrency)
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(len(dst.uploads))
 	for _, d := range descs {
 		g.Go(func() error {
+			store := <-stores
+			defer func() { stores <- store }()
 			if err := transferOne(gctx, src, store, d, ps.layerFor(d)); err != nil {
 				return err
 			}
@@ -31,20 +37,25 @@ func transferBlobs(ctx context.Context, src *localSource, dst *remoteSink, descs
 	return g.Wait()
 }
 
-func transferOne(ctx context.Context, src *localSource, dst content.Store, d ocispec.Descriptor, lb *layerBar) error {
+func transferOne(ctx context.Context, src *localSource, dst content.Store, d ocispec.Descriptor, lb *layerBar) (retErr error) {
+	defer func() {
+		if retErr != nil {
+			lb.abort()
+		} else {
+			lb.transferFinish()
+		}
+	}()
+
 	_, err := dst.Info(ctx, d.Digest)
 	if err == nil {
-		lb.transferFinish()
 		return nil
 	}
 	if !errdefs.IsNotFound(err) {
-		lb.abort()
 		return fmt.Errorf("stat remote %s: %w", d.Digest, err)
 	}
 
 	ra, err := src.ReaderAt(ctx, d)
 	if err != nil {
-		lb.abort()
 		return fmt.Errorf("open local reader %s: %w", d.Digest, err)
 	}
 	defer func() { _ = ra.Close() }()
@@ -55,20 +66,16 @@ func transferOne(ctx context.Context, src *localSource, dst content.Store, d oci
 	)
 	if err != nil {
 		if errdefs.IsAlreadyExists(err) {
-			lb.transferFinish()
 			return nil
 		}
-		lb.abort()
 		return fmt.Errorf("open writer %s: %w", d.Digest, err)
 	}
 	defer func() { _ = w.Close() }()
 
 	reader := io.NewSectionReader(ra, 0, ra.Size())
 	if err := content.Copy(ctx, w, lb.proxyReader(reader), d.Size, d.Digest); err != nil {
-		lb.abort()
 		return fmt.Errorf("copy %s: %w", d.Digest, err)
 	}
-	lb.transferFinish()
 	return nil
 }
 

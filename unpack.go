@@ -22,8 +22,8 @@ import (
 )
 
 // unpackRemote uses core/unpack on snapshotters that advertise the "rebase"
-// capability (containerd 2.2+). Older snapshotters need serial apply because
-// parallel unpack races on the parent chain.
+// capability (containerd 2.2+). Older snapshotters unpack serially because
+// a layer snapshot can only be prepared once its parent chain is committed.
 func unpackRemote(ctx context.Context, dst *remoteSink, store content.Store, img images.Image, plats []ocispec.Platform, descs []ocispec.Descriptor, tracker *readiness, ps *progressState) error {
 	// waitingApplier must be the outer wrapper so the Extracting label only
 	// fires after the layer has landed, not when apply is dispatched.
@@ -40,26 +40,32 @@ func unpackRemote(ctx context.Context, dst *remoteSink, store content.Store, img
 	// Flip bars for layers whose chain is already unpacked, independently of
 	// the unpacker's serialized topHalf loop.
 	sn := dst.client.SnapshotService(remoteSnapshotter)
-	if len(plats) == 0 {
-		scanExistingChains(ctx, store, sn, img, platforms.All, ps)
-	} else {
-		for _, p := range plats {
-			scanExistingChains(ctx, store, sn, img, platforms.Only(p), ps)
-		}
+	for _, m := range matchersFor(plats) {
+		scanExistingChains(ctx, store, sn, img, m, ps)
 	}
 
 	if slices.Contains(plugin.GetCapabilities(), "rebase") {
 		return unpackParallel(ctx, dst, store, img, unpackMatcher(plats), applier, descs)
 	}
-	if len(plats) == 0 {
-		return unpackSerial(ctx, dst, store, img, platforms.All, applier)
-	}
-	for _, p := range plats {
-		if err := unpackSerial(ctx, dst, store, img, platforms.Only(p), applier); err != nil {
+	for _, m := range matchersFor(plats) {
+		if err := unpackSerial(ctx, dst, store, img, m, applier); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// matchersFor returns one matcher per requested platform, or platforms.All
+// when the caller has no filter.
+func matchersFor(plats []ocispec.Platform) []platforms.MatchComparer {
+	if len(plats) == 0 {
+		return []platforms.MatchComparer{platforms.All}
+	}
+	ms := make([]platforms.MatchComparer, len(plats))
+	for i, p := range plats {
+		ms[i] = platforms.Only(p)
+	}
+	return ms
 }
 
 // scanExistingChains walks the image's layer chain for the matched platform
@@ -92,8 +98,8 @@ func scanExistingChains(ctx context.Context, store content.Store, sn snapshots.S
 	}
 }
 
-// unpackMatcher falls back to platforms.All when the caller has no filter;
-// descs already scopes the walk to the user's selection.
+// unpackMatcher falls back to platforms.All when the caller has no filter.
+// The descs list already scopes the walk to the user's selection.
 func unpackMatcher(plats []ocispec.Platform) platforms.MatchComparer {
 	if len(plats) == 0 {
 		return platforms.All

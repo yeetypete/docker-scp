@@ -35,7 +35,10 @@ make uninstall-docker-plugin
 docker scp [OPTIONS] IMAGE [USER@]HOST[:PORT]
 
 Options:
-      --platform string   Push a specific platform of a multi-platform image (e.g. linux/arm64)
+      --local-socket string    Local containerd socket path (default "/run/containerd/containerd.sock")
+      --platform strings       Push specific platforms of a multi-platform image
+                               (comma-separated, e.g. linux/amd64,linux/arm64)
+      --remote-socket string   Remote containerd socket path (default "/run/containerd/containerd.sock")
 ```
 
 ### Examples
@@ -46,10 +49,10 @@ Push an image to a remote host:
 docker scp ubuntu:24.04 user@remote
 ```
 
-Select a specific platform from a multi-platform image:
+Select specific platforms from a multi-platform image:
 
 ```bash
-docker scp --platform linux/arm64 ubuntu:24.04 user@remote
+docker scp --platform linux/amd64,linux/arm64 ubuntu:24.04 user@remote
 ```
 
 ## Prerequisites
@@ -61,6 +64,14 @@ remote one over SSH, so **both the local and remote machines** need:
 
 1. Group access to `/run/containerd/containerd.sock`. The user running `docker scp`
    locally and the SSH user on the remote both need to be in the socket's group.
+
+If a containerd socket lives somewhere else (e.g. a rootless containerd under
+`$XDG_RUNTIME_DIR`), point the plugin at it with `--local-socket` /
+`--remote-socket`.
+
+When the SSH server does not allow unix socket forwarding (e.g. Tailscale
+SSH), the remote also needs `nc` from netcat-openbsd 1.130 or newer (Ubuntu
+18.04+, Debian stretch+).
 
 ### Adding a containerd Group
 

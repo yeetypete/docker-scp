@@ -47,12 +47,12 @@ type readiness struct {
 	ch map[digest.Digest]chan struct{}
 }
 
+// newReadiness tracks the given descriptors, which resolveAndEnumerate has
+// already deduplicated by digest.
 func newReadiness(descs []ocispec.Descriptor) *readiness {
 	m := make(map[digest.Digest]chan struct{}, len(descs))
 	for _, d := range descs {
-		if _, ok := m[d.Digest]; !ok {
-			m[d.Digest] = make(chan struct{})
-		}
+		m[d.Digest] = make(chan struct{})
 	}
 	return &readiness{ch: m}
 }

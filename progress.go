@@ -109,8 +109,7 @@ func (s *progressState) finalize() {
 	defer s.mu.Unlock()
 	for _, lb := range s.bars {
 		if !lb.extractEnd.Load() {
-			lb.extractEnd.Store(true)
-			lb.bar.SetTotal(lb.size, true)
+			lb.extractFinish()
 		}
 	}
 }

@@ -5,32 +5,25 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/signal"
-	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
+	"github.com/containerd/containerd/v2/core/leases"
 	ctrdlog "github.com/containerd/log"
 	"github.com/containerd/platforms"
+	"github.com/docker/cli/cli"
+	"github.com/docker/cli/cli-plugins/metadata"
+	"github.com/docker/cli/cli-plugins/plugin"
+	"github.com/docker/cli/cli/command"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
-	"github.com/spf13/pflag"
+	"github.com/spf13/cobra"
 	"github.com/vbauerster/mpb/v8"
 	"golang.org/x/sync/errgroup"
 )
-
-const usage = `Usage:  docker scp [OPTIONS] IMAGE [USER@]HOST[:PORT]
-
-Push an image directly to a remote containerd over SSH
-
-Options:
-      --platform strings   Push specific platforms of a multi-platform image
-                           (comma-separated, e.g. linux/amd64,linux/arm64)`
 
 const (
 	version              = "0.0.1"
@@ -38,112 +31,79 @@ const (
 	remoteNamespace      = "moby"
 	remoteSnapshotter    = "overlayfs"
 	localNamespace       = "moby"
-	uploadConcurrency    = 6
+	// uploadConcurrency is the number of concurrent blob uploads, each on a
+	// dedicated gRPC connection (its own SSH channel).
+	uploadConcurrency = 6
 )
 
-type pluginMetadata struct {
-	SchemaVersion    string `json:"SchemaVersion"`
-	Vendor           string `json:"Vendor"`
-	Version          string `json:"Version"`
-	ShortDescription string `json:"ShortDescription"`
-	URL              string `json:"URL,omitempty"`
-}
-
 func main() {
-	if code := run(); code != 0 {
-		os.Exit(code)
-	}
+	plugin.Run(newScpCommand, metadata.Metadata{
+		SchemaVersion:    "0.1.0",
+		Vendor:           "scp",
+		Version:          version,
+		ShortDescription: "Push images directly to a remote containerd over SSH",
+		URL:              "https://github.com/yeetypete/docker-scp",
+	})
 }
 
-func run() int {
-	args := os.Args[1:]
+func newScpCommand(_ command.Cli) *cobra.Command {
+	var cfg pushConfig
+	var platformStrs []string
+	cmd := &cobra.Command{
+		Use:   "scp [OPTIONS] IMAGE [USER@]HOST[:PORT]",
+		Short: "Push an image directly to a remote containerd over SSH",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			reqPlatforms, err := platforms.ParseAll(platformStrs)
+			if err != nil {
+				return err
+			}
+			cfg.ImageRef, cfg.SSHTarget, cfg.Platforms = args[0], args[1], reqPlatforms
 
-	// Docker CLI plugins get their subcommand name as the first arg. Strip
-	// it so the rest of argv matches what the user typed.
-	bin := filepath.Base(os.Args[0])
-	if strings.HasPrefix(bin, "docker-") && len(args) > 0 {
-		if args[0] == strings.TrimPrefix(bin, "docker-") {
-			args = args[1:]
-		}
-	}
+			// Suppress containerd's internal log lines (snapshot cleanup
+			// noise on cancel, etc.). Push-level errors surface via RunE.
+			_ = ctrdlog.SetLevel("fatal")
 
-	if len(args) >= 1 && args[0] == "docker-cli-plugin-metadata" {
-		if err := json.NewEncoder(os.Stdout).Encode(pluginMetadata{
-			SchemaVersion:    "0.1.0",
-			Vendor:           "scp",
-			Version:          version,
-			ShortDescription: "Push images directly to a remote containerd over SSH",
-			URL:              "https://github.com/yeetypete/scp",
-		}); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			return 1
-		}
-		return 0
-	}
+			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
 
-	fs := pflag.NewFlagSet("docker scp", pflag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	platformStrs := fs.StringSlice("platform", nil, "")
-	if err := fs.Parse(args); err != nil {
-		if errors.Is(err, pflag.ErrHelp) {
-			_, _ = fmt.Fprintln(os.Stdout, usage)
-			return 0
-		}
-		fmt.Fprintln(os.Stderr, err)
-		fmt.Fprintln(os.Stderr, usage)
-		return 2
+			err = push(ctx, cfg)
+			if errors.Is(err, context.Canceled) && ctx.Err() != nil {
+				return cli.StatusError{StatusCode: 130, Status: "cancelled"}
+			}
+			if err != nil {
+				return fmt.Errorf("push failed: %w", err)
+			}
+			return nil
+		},
+		SilenceUsage:  true,
+		SilenceErrors: true,
 	}
-	positional := fs.Args()
-	if len(positional) != 2 {
-		fmt.Fprintln(os.Stderr, usage)
-		return 2
-	}
-
-	var reqPlatforms []ocispec.Platform
-	for _, s := range *platformStrs {
-		p, err := platforms.Parse(s)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "invalid --platform %q: %v\n", s, err)
-			return 2
-		}
-		reqPlatforms = append(reqPlatforms, p)
-	}
-
-	// Suppress containerd's internal log lines (snapshot cleanup noise on
-	// cancel, etc.). Push-level errors surface via stderr from push().
-	_ = ctrdlog.SetLevel("fatal")
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	cfg := pushConfig{ImageRef: positional[0], SSHTarget: positional[1], Platforms: reqPlatforms}
-	err := push(ctx, cfg)
-	if err == nil {
-		return 0
-	}
-	if errors.Is(err, context.Canceled) && ctx.Err() != nil {
-		fmt.Fprintln(os.Stderr, "cancelled")
-		return 130
-	}
-	fmt.Fprintf(os.Stderr, "push failed: %v\n", err)
-	return 1
+	flags := cmd.Flags()
+	flags.StringSliceVar(&platformStrs, "platform", nil,
+		"Push specific platforms of a multi-platform image (comma-separated, e.g. linux/amd64,linux/arm64)")
+	flags.StringVar(&cfg.LocalSocket, "local-socket", containerdSocketPath, "Local containerd socket path")
+	flags.StringVar(&cfg.RemoteSocket, "remote-socket", containerdSocketPath, "Remote containerd socket path")
+	return cmd
 }
 
 type pushConfig struct {
 	ImageRef  string
 	SSHTarget string
 	// Empty Platforms means "every platform locally present".
-	Platforms []ocispec.Platform
+	Platforms    []ocispec.Platform
+	LocalSocket  string
+	RemoteSocket string
 }
 
 func push(ctx context.Context, cfg pushConfig) error {
-	local, err := openLocal()
+	local, err := openLocal(cfg.LocalSocket)
 	if err != nil {
 		return fmt.Errorf("open local containerd: %w", err)
 	}
 	defer func() { _ = local.Close() }()
 
-	img, descs, effective, err := local.resolveAndEnumerate(ctx, cfg.ImageRef, cfg.Platforms)
+	res, err := local.resolveAndEnumerate(ctx, cfg.ImageRef, cfg.Platforms)
 	if err != nil {
 		return fmt.Errorf("resolve image: %w", err)
 	}
@@ -156,24 +116,33 @@ func push(ctx context.Context, cfg pushConfig) error {
 
 	fmt.Fprintf(os.Stderr, "Pushing %s to %s\n", cfg.ImageRef, cfg.SSHTarget)
 	start := time.Now()
-	prog := mpb.New(mpb.WithOutput(os.Stderr), mpb.WithWidth(40))
+	// PopCompletedMode prints each completed bar once and drops it from the
+	// live region. Keeping every bar live ghosts duplicate lines into
+	// scrollback on each refresh once the bar count exceeds the terminal
+	// height.
+	prog := mpb.New(mpb.WithOutput(os.Stderr), mpb.WithWidth(40), mpb.PopCompletedMode())
 	ps := newProgressState(prog)
 
-	tracker := newReadiness(descs)
+	tracker := newReadiness(res.descs)
 	waitStore := &waitingStore{Store: remote.client.ContentStore(), ready: tracker}
 
-	g, gctx := errgroup.WithContext(ctx)
+	// Nothing references the remote content and snapshots created below
+	// until finalizeImage sets the gc.ref labels, so tie them to the push
+	// lease or a concurrent remote GC can collect them mid-push.
+	leaseCtx := leases.WithLease(ctx, remote.lease.ID)
+
+	g, gctx := errgroup.WithContext(leaseCtx)
 	g.Go(func() error {
-		return transferBlobs(gctx, local, remote, descs, tracker, ps)
+		return transferBlobs(gctx, local, remote, res.descs, tracker, ps)
 	})
 	g.Go(func() error {
-		return unpackRemote(gctx, remote, waitStore, img, effective, descs, tracker, ps)
+		return unpackRemote(gctx, remote, waitStore, res.img, res.platforms, res.descs, tracker, ps)
 	})
 	if err := g.Wait(); err != nil {
 		return err
 	}
 
-	if err := finalizeImage(ctx, remote, img, descs); err != nil {
+	if err := finalizeImage(leaseCtx, remote, res.img, res.descs); err != nil {
 		return fmt.Errorf("finalize image: %w", err)
 	}
 

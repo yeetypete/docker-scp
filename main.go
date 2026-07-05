@@ -1,6 +1,3 @@
-// Package main implements the scp docker CLI plugin: push docker/OCI images
-// directly from a local containerd content store to a remote containerd over
-// SSH, with no intermediate registry and no remote daemon.
 package main
 
 import (
@@ -25,8 +22,10 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// version is overridden at release build time via -ldflags "-X main.version=...".
+var version = "0.0.1"
+
 const (
-	version              = "0.0.1"
 	containerdSocketPath = "/run/containerd/containerd.sock"
 	remoteNamespace      = "moby"
 	remoteSnapshotter    = "overlayfs"
